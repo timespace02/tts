@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能语音助手</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+    <style>
+        .markdown-body {
+            background-color: #f6f8fa;
+            border-radius: 6px;
+            padding: 16px;
+            font-size: 14px;
+            line-height: 1.5;
+            color: #24292e;
+            max-height: 400px;
+            overflow: auto;
+        }
+        .markdown-body pre {
+            background-color: #f0f0f0;
+            border-radius: 3px;
+            padding: 16px;
+            overflow-x: auto;
+        }
+        .markdown-body code {
+            background-color: #f0f0f0;
+            border-radius: 3px;
+            padding: 0.2em 0.4em;
+            font-size: 85%;
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); }
+        }
+        .speaker-active {
+            animation: pulse 1s infinite;
+            background-color: #48bb78 !important;
+            color: white !important;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8 flex flex-col h-screen max-w-4xl">
+        <div class="bg-white shadow-md rounded-lg p-4 mb-4">
+            <div class="flex flex-col gap-2">
+                <input id="baseUrlInput" type="text" placeholder="API Base URL" class="border border-gray-300 rounded p-2" />
+                <input id="apiKeyInput" type="password" placeholder="输入API Key" class="border border-gray-300 rounded p-2" />
+                <div class="flex flex-col sm:flex-row gap-2 items-center">
+                    <select id="modelSelect" class="border border-gray-300 rounded p-2 w-full sm:w-auto">
+                        <!-- 模型选项将在这里动态添加 -->
+                    </select>
+                    <div class="flex items-center w-full sm:w-auto">
+                        <input id="ttsSpeed" type="range" min="0.5" max="2" step="0.1" value="1" class="w-full sm:w-32" />
+                        <span id="ttsSpeedValue" class="ml-2 whitespace-nowrap">TTS速度: 1</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div id="chatContainer" class="flex-grow overflow-y-auto bg-white shadow-md rounded-lg p-4 mb-4">
+            <!-- 对话内容将在这里动态添加 -->
+        </div>
+        <div class="bg-white shadow-md rounded-lg p-4">
+            <div class="flex flex-col sm:flex-row items-center gap-2">
+                <button id="micButton" class="bg-blue-500 text-white rounded-full p-2 hover:bg-blue-600 w-full sm:w-auto mb-2 sm:mb-0">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                    </svg>
+                </button>
+                <input id="userInput" type="text" placeholder="输入你的消息..." 
+                       class="border border-gray-300 rounded-lg p-2 w-full focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                <div class="flex w-full sm:w-auto gap-2">
+                    <button id="sendButton" class="bg-blue-500 text-white rounded-lg p-2 hover:bg-blue-600 flex-grow sm:flex-grow-0">发送</button>
+                    <button id="clearButton" class="bg-red-500 text-white rounded-lg p-2 hover:bg-red-600 flex-grow sm:flex-grow-0">清屏</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let API_BASE_URL = '';
+        let currentAudio = null;
+        let currentAudioSource = null;
+        let currentSpeakerButton = null;
+        let latestSpeakerButton = null;
+        const baseUrlInput = document.getElementById('baseUrlInput');
+        const apiKeyInput = document.getElementById('apiKeyInput');
+        const modelSelect = document.getElementById('modelSelect');
+        const ttsSpeed = document.getElementById('ttsSpeed');
+        const ttsSpeedValue = document.getElementById('ttsSpeedValue');
+        const chatContainer = document.getElementById('chatContainer');
+        const userInput = document.getElementById('userInput');
+        const sendButton = document.getElementById('sendButton');
+        const micButton = document.getElementById('micButton');
+        const clearButton = document.getElementById('clearButton');
+
+        let isRecording = false;
+        let mediaRecorder;
+        let audioChunks = [];
+        let conversationHistory = [];
+
+        function saveSettings() {
+            localStorage.setItem('baseUrl', baseUrlInput.value);
+            localStorage.setItem('apiKey', apiKeyInput.value);
+        }
+
+        function loadSettings() {
+            const savedBaseUrl = localStorage.getItem('baseUrl');
+            const savedApiKey = localStorage.getItem('apiKey');
+            
+            if (savedBaseUrl) {
+                baseUrlInput.value = savedBaseUrl;
+                API_BASE_URL = savedBaseUrl;
+            }
+            
+            if (savedApiKey) {
+                apiKeyInput.value = savedApiKey;
+                fetchModels();
+            }
+        }
+
+        baseUrlInput.addEventListener('input', updateBaseUrl);
+        sendButton.addEventListener('click', sendMessage);
+        userInput.addEventListener('keypress', (e) => e.key === 'Enter' && sendMessage());
+        micButton.addEventListener('click', toggleRecording);
+        clearButton.addEventListener('click', clearChat);
+        ttsSpeed.addEventListener('input', updateTTSSpeed);
+        apiKeyInput.addEventListener('input', debounce(() => {
+            fetchModels();
+            saveSettings();
+        }, 500));
+
+        function updateBaseUrl() {
+            API_BASE_URL = baseUrlInput.value.trim();
+            saveSettings();
+        }
+
+        function debounce(func, wait) {
+            let timeout;
+            return function executedFunction(...args) {
+                const later = () => {
+                    clearTimeout(timeout);
+                    func(...args);
+                };
+                clearTimeout(timeout);
+                timeout = setTimeout(later, wait);
+            };
+        }
+
+        function updateTTSSpeed() {
+            ttsSpeedValue.textContent = `TTS速度: ${ttsSpeed.value}`;
+        }
+
+        async function fetchModels() {
+            const apiKey = apiKeyInput.value.trim();
+            if (!apiKey || !API_BASE_URL) {
+                modelSelect.innerHTML = '<option value="">请先输入 API Key 和 Base URL</option>';
+                return;
+            }
+
+            try {
+                const response = await axios.get(`${API_BASE_URL}/v1/models`, {
+                    headers: {
+                        'Authorization': `Bearer ${apiKey}`
+                    }
+                });
+                const models = response.data.data
+                    .filter(model => /^(gpt|claude|gemini)-/.test(model.id))
+                    .map(model => model.id);
+                populateModelSelect(models);
+            } catch (error) {
+                console.error('Error fetching models:', error);
+                showNotification('获取模型列表失败', 'error');
+                modelSelect.innerHTML = '<option value="">获取模型失败</option>';
+            }
+        }
+
+        function populateModelSelect(models) {
+            modelSelect.innerHTML = '';
+            if (models.length === 0) {
+                modelSelect.innerHTML = '<option value="">没有可用的模型</option>';
+                return;
+            }
+            models.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model;
+                option.textContent = model;
+                modelSelect.appendChild(option);
+            });
+        }
+
+        function toggleRecording() {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        }
+
+        async function startRecording() {
+            stopCurrentAudio();
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                audioChunks = [];
+
+                mediaRecorder.ondataavailable = (event) => {
+                    audioChunks.push(event.data);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                    await transcribeAudio(audioBlob);
+                };
+
+                mediaRecorder.start();
+                isRecording = true;
+                micButton.classList.remove('bg-blue-500', 'hover:bg-blue-600');
+                micButton.classList.add('bg-red-500', 'hover:bg-red-600');
+                showNotification('麦克风已开启');
+            } catch (error) {
+                console.error('Error accessing microphone:', error);
+                showNotification('无法访问麦克风', 'error');
+            }
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && isRecording) {
+                mediaRecorder.stop();
+                isRecording = false;
+                micButton.classList.remove('bg-red-500', 'hover:bg-red-600');
+                micButton.classList.add('bg-blue-500', 'hover:bg-blue-600');
+                showNotification('麦克风已关闭');
+            }
+        }
+
+        function showNotification(message, type = 'info') {
+            const notification = document.createElement('div');
+            notification.textContent = message;
+            notification.className = `fixed top-4 right-4 p-2 rounded-lg text-white ${type === 'error' ? 'bg-red-500' : 'bg-green-500'}`;
+            document.body.appendChild(notification);
+            setTimeout(() => notification.remove(), 3000);
+        }
+
+        async function transcribeAudio(audioBlob) {
+            const formData = new FormData();
+            formData.append('file', audioBlob, 'audio.wav');
+            formData.append('model', 'whisper-1');
+
+            try {
+                const response = await axios.post(`${API_BASE_URL}/v1/audio/transcriptions`, formData, {
+                    headers: {
+                        'Authorization': `Bearer ${apiKeyInput.value}`,
+                        'Content-Type': 'multipart/form-data'
+                    }
+                });
+
+                userInput.value = response.data.text;
+                sendMessage();
+            } catch (error) {
+                console.error('Error transcribing audio:', error);
+                showNotification('音频转写失败', 'error');
+            }
+        }
+
+        async function sendMessage() {
+            const message = userInput.value.trim();
+            if (message) {
+                addMessageToChat('user', message);
+                userInput.value = '';
+
+                conversationHistory.push({ role: 'user', content: message });
+                if (conversationHistory.length > 10) {
+                    conversationHistory = conversationHistory.slice(-10);
+                }
+
+                try {
+                    const response = await axios.post(`${API_BASE_URL}/v1/chat/completions`, {
+                        model: modelSelect.value,
+                        messages: conversationHistory
+                    }, {
+                        headers: {
+                            'Authorization': `Bearer ${apiKeyInput.value}`,
+                            'Content-Type': 'application/json'
+                        }
+                    });
+
+                    const reply = response.data.choices[0].message.content;
+                    const speakerButton = addMessageToChat('assistant', reply);
+                    conversationHistory.push({ role: 'assistant', content: reply });
+                    speakMessage(reply, speakerButton);
+                } catch (error) {
+                    console.error('Error sending message to GPT:', error);
+                    showNotification('发送消息失败', 'error');
+                }
+            }
+        }
+
+        function addMessageToChat(role, content) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `flex mb-4 ${role === 'user' ? 'justify-end' : 'justify-start'}`;
+            
+            const innerDiv = document.createElement('div');
+            innerDiv.className = 'max-w-[70%]';
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = `p-2 rounded-lg ${role === 'user' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-black'}`;
+            
+            if (role === 'assistant') {
+                contentDiv.innerHTML = DOMPurify.sanitize(marked.parse(content));
+                contentDiv.classList.add('markdown-body');
+            } else {
+                contentDiv.textContent = content;
+            }
+
+            innerDiv.appendChild(contentDiv);
+
+            let speakerButton;
+            if (role === 'assistant') {
+                speakerButton = document.createElement('button');
+                speakerButton.className = 'mt-2 p-1 bg-blue-500 text-white rounded-full hover:bg-blue-600 transition-colors duration-300';
+                speakerButton.innerHTML = '🔊';
+                speakerButton.onclick = () => toggleSpeech(content, speakerButton);
+                innerDiv.appendChild(speakerButton);
+            }
+
+            messageDiv.appendChild(innerDiv);
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+
+            return speakerButton;
+        }
+
+        function toggleSpeech(message, button) {
+            if (button === currentSpeakerButton) {
+                stopCurrentAudio();
+            } else {
+                speakMessage(message, button);
+            }
+        }
+
+        async function speakMessage(message, button) {
+            latestSpeakerButton = button;
+            const plainText = message.replace(/```[\s\S]*?```/g, '').replace(/`([^`]+)`/g, '$1');
+            
+            stopCurrentAudio();
+
+            try {
+                const response = await axios.post(`${API_BASE_URL}/v1/audio/speech`, {
+                    model: 'tts-1',
+                    input: plainText,
+                    voice: 'alloy',
+                    speed: parseFloat(ttsSpeed.value)
+                }, {
+                    headers: {
+                        'Authorization': `Bearer ${apiKeyInput.value}`,
+                        'Content-Type': 'application/json'
+                    },
+                    responseType: 'arraybuffer'
+                });
+
+                if (button !== latestSpeakerButton) {
+                    return; // 如果在等待过程中有新的请求，则放弃当前请求
+                }
+
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const audioBuffer = await audioContext.decodeAudioData(response.data);
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start(0);
+
+                currentAudio = audioContext;
+                currentAudioSource = source;
+                currentSpeakerButton = button;
+
+                button.classList.add('speaker-active');
+
+                source.onended = () => {
+                    if (currentSpeakerButton === button) {
+                        stopCurrentAudio();
+                    }
+                };
+            } catch (error) {
+                console.error('Error generating speech:', error);
+                showNotification('语音生成失败', 'error');
+            }
+        }
+
+        function stopCurrentAudio() {
+            if (currentAudioSource) {
+                currentAudioSource.stop();
+            }
+            if (currentAudio) {
+                currentAudio.close();
+            }
+            if (currentSpeakerButton) {
+                currentSpeakerButton.classList.remove('speaker-active');
+            }
+            currentAudio = null;
+            currentAudioSource = null;
+            currentSpeakerButton = null;
+        }
+
+        function clearChat() {
+            chatContainer.innerHTML = '';
+            conversationHistory = [];
+            stopCurrentAudio();
+        }
+
+        updateTTSSpeed();
+        loadSettings(); // 加载保存的设置
+    </script>
+</body>
+</html>
